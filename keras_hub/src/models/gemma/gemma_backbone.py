@@ -1,5 +1,6 @@
 import keras
 from keras import ops
+from keras import RematScope
 
 from keras_hub.src.api_export import keras_hub_export
 from keras_hub.src.layers.modeling.reversible_embedding import (
@@ -106,45 +107,46 @@ class GemmaBackbone(Backbone):
         **kwargs,
     ):
         # === Layers ===
-        self.token_embedding = ReversibleEmbedding(
-            input_dim=vocabulary_size,
-            output_dim=hidden_dim,
-            tie_weights=True,
-            embeddings_initializer=keras.initializers.VarianceScaling(
-                scale=1.0,
-                mode="fan_in",
-                distribution="untruncated_normal",
-                seed=None,
-            ),
-            dtype=dtype,
-            logit_soft_cap=final_logit_soft_cap,
-            name="token_embedding",
-        )
-        self.transformer_layers = []
-        for i in range(num_layers):
-            sliding_window = use_sliding_window_attention and (i % 2 == 0)
-            layer = GemmaDecoderBlock(
-                intermediate_dim=intermediate_dim,
-                hidden_dim=hidden_dim,
-                num_query_heads=num_query_heads,
-                head_dim=head_dim,
-                num_key_value_heads=num_key_value_heads,
-                query_head_dim_normalize=query_head_dim_normalize,
-                use_post_ffw_norm=use_post_ffw_norm,
-                use_post_attention_norm=use_post_attention_norm,
-                logit_soft_cap=attention_logit_soft_cap,
-                use_sliding_window_attention=sliding_window,
-                sliding_window_size=sliding_window_size,
-                dropout=dropout,
+        with RematScope(mode="activations"):
+            self.token_embedding = ReversibleEmbedding(
+                input_dim=vocabulary_size,
+                output_dim=hidden_dim,
+                tie_weights=True,
+                embeddings_initializer=keras.initializers.VarianceScaling(
+                    scale=1.0,
+                    mode="fan_in",
+                    distribution="untruncated_normal",
+                    seed=None,
+                ),
                 dtype=dtype,
-                name=f"decoder_block_{i}",
+                logit_soft_cap=final_logit_soft_cap,
+                name="token_embedding",
             )
-            self.transformer_layers.append(layer)
-        self.layer_norm = RMSNormalization(
-            epsilon=layer_norm_epsilon,
-            dtype=dtype,
-            name="final_normalization",
-        )
+            self.transformer_layers = []
+            for i in range(num_layers):
+                sliding_window = use_sliding_window_attention and (i % 2 == 0)
+                layer = GemmaDecoderBlock(
+                    intermediate_dim=intermediate_dim,
+                    hidden_dim=hidden_dim,
+                    num_query_heads=num_query_heads,
+                    head_dim=head_dim,
+                    num_key_value_heads=num_key_value_heads,
+                    query_head_dim_normalize=query_head_dim_normalize,
+                    use_post_ffw_norm=use_post_ffw_norm,
+                    use_post_attention_norm=use_post_attention_norm,
+                    logit_soft_cap=attention_logit_soft_cap,
+                    use_sliding_window_attention=sliding_window,
+                    sliding_window_size=sliding_window_size,
+                    dropout=dropout,
+                    dtype=dtype,
+                    name=f"decoder_block_{i}",
+                )
+                self.transformer_layers.append(layer)
+            self.layer_norm = RMSNormalization(
+                epsilon=layer_norm_epsilon,
+                dtype=dtype,
+                name="final_normalization",
+            )
 
         # === Functional Model ===
         token_id_input = keras.Input(
