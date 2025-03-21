@@ -107,23 +107,23 @@ class GemmaBackbone(Backbone):
         **kwargs,
     ):
         # === Layers ===
+        with RematScope(mode=None):
+            self.token_embedding = ReversibleEmbedding(
+                input_dim=vocabulary_size,
+                output_dim=hidden_dim,
+                tie_weights=True,
+                embeddings_initializer=keras.initializers.VarianceScaling(
+                    scale=1.0,
+                    mode="fan_in",
+                    distribution="untruncated_normal",
+                    seed=None,
+                ),
+                dtype=dtype,
+                logit_soft_cap=final_logit_soft_cap,
+                name="token_embedding",
+            )
+            self.transformer_layers = []
         
-        self.token_embedding = ReversibleEmbedding(
-            input_dim=vocabulary_size,
-            output_dim=hidden_dim,
-            tie_weights=True,
-            embeddings_initializer=keras.initializers.VarianceScaling(
-                scale=1.0,
-                mode="fan_in",
-                distribution="untruncated_normal",
-                seed=None,
-            ),
-            dtype=dtype,
-            logit_soft_cap=final_logit_soft_cap,
-            name="token_embedding",
-        )
-        self.transformer_layers = []
-        with RematScope(mode="activations"):
             for i in range(num_layers):
                 sliding_window = use_sliding_window_attention and (i % 2 == 0)
                 layer = GemmaDecoderBlock(
