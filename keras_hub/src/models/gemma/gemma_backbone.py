@@ -107,7 +107,7 @@ class GemmaBackbone(Backbone):
         **kwargs,
     ):
         # === Layers ===
-        with RematScope(mode=None):
+        with RematScope(mode="full"):
             self.token_embedding = ReversibleEmbedding(
                 input_dim=vocabulary_size,
                 output_dim=hidden_dim,
