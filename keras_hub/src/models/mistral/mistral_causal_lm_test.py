@@ -1,6 +1,7 @@
 import os
 from unittest.mock import patch
 
+import keras
 import pytest
 from keras import ops
 
@@ -11,6 +12,8 @@ from keras_hub.src.models.mistral.mistral_causal_lm_preprocessor import (
 )
 from keras_hub.src.models.mistral.mistral_tokenizer import MistralTokenizer
 from keras_hub.src.tests.test_case import TestCase
+from keras_hub.src.utils.keras_utils import has_flash_attention_support
+from keras_hub.src.utils.keras_utils import running_on_gpu
 
 
 class MistralCausalLMTest(TestCase):
@@ -38,6 +41,18 @@ class MistralCausalLMTest(TestCase):
         }
         self.train_data = (["the quick brown fox", "the earth is round"],)
         self.input_data = self.preprocessor(*self.train_data)[0]
+
+    def test_flash_attention_call(self):
+        if keras.config.backend() != "jax" or not has_flash_attention_support():
+            self.skipTest("`flash_attention` testing requires the Jax backend.")
+
+        with patch("keras.src.backend.nn.dot_product_attention") as mock_func:
+            causal_lm = MistralCausalLM(**self.init_kwargs)
+            causal_lm.generate("the quick brown fox")
+            if running_on_gpu():
+                mock_func.assert_called()
+            else:
+                mock_func.assert_not_called()
 
     def test_causal_lm_basics(self):
         self.run_task_test(
