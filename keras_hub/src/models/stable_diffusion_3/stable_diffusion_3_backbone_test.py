@@ -1,3 +1,6 @@
+from unittest.mock import patch
+
+import keras
 import pytest
 from keras import ops
 
@@ -7,6 +10,8 @@ from keras_hub.src.models.stable_diffusion_3.stable_diffusion_3_backbone import 
 )
 from keras_hub.src.models.vae.vae_backbone import VAEBackbone
 from keras_hub.src.tests.test_case import TestCase
+from keras_hub.src.utils.keras_utils import has_flash_attention_support
+from keras_hub.src.utils.keras_utils import running_on_gpu
 
 
 class StableDiffusion3BackboneTest(TestCase):
@@ -52,6 +57,17 @@ class StableDiffusion3BackboneTest(TestCase):
             "guidance_scale": ops.ones((2,)),
         }
 
+    def test_flash_attention_call(self):
+        if keras.config.backend() != "jax" or not has_flash_attention_support():
+            self.skipTest("`flash_attention` testing requires the Jax backend.")
+
+        with patch("keras.src.backend.nn.dot_product_attention") as mock_func:
+            sd_model = StableDiffusion3Backbone(**self.init_kwargs)
+            sd_model(self.input_data)
+            if running_on_gpu():
+                mock_func.assert_called()
+            else:
+                mock_func.assert_not_called()
     def test_backbone_basics(self):
         self.run_backbone_test(
             cls=StableDiffusion3Backbone,
