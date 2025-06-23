@@ -419,15 +419,33 @@ class DistillerTest(TestCase):
     def test_feature_distillation_projection_dim_inference_works_for_lambda(self):
         # Test that projection dim can be inferred for a Lambda layer with a defined output shape
         student_input = keras.Input(shape=(10,), name="student_input_lambda")
+
+        teacher_intermediate_layer = self.teacher_model.get_layer("teacher_intermediate_features")
         # Define the output dimension for the lambda layer explicitly
         # Use list(tensor_shape) for robustness
-        teacher_intermediate_layer = self.teacher_model.get_layer("teacher_intermediate_features")
         lambda_output_dim = list(teacher_intermediate_layer.output.shape)[-1] // 2
+
+        # Add a trainable Dense layer before the Lambda layer to ensure gradients can flow
+        # from the FeatureDistillation loss.
+        # Its output dimension should be compatible with the Lambda layer's slicing logic.
+        # For instance, if lambda_output_dim is D, make this layer output 2*D or similar.
+        pre_lambda_dense_dim = lambda_output_dim * 2
+        if pre_lambda_dense_dim == 0 and lambda_output_dim == 0: # Handle case where teacher intermediate dim is 1, so lambda_output_dim is 0
+            pre_lambda_dense_dim = 1 # Ensure Dense layer has at least 1 unit if lambda_output_dim is 0 to avoid issues.
+                                     # Lambda will slice an empty tensor, which is fine.
+
+        hidden_dense_out = keras.layers.Dense(
+            pre_lambda_dense_dim,
+            activation="relu",
+            name="student_pre_lambda_dense"
+        )(student_input)
+
         intermediate_out = keras.layers.Lambda(
-            lambda t: t[:, :lambda_output_dim],
+            lambda t: t[:, :lambda_output_dim], # Slices the output of hidden_dense_out
             output_shape=(lambda_output_dim,), # Explicitly provide output_shape
             name="student_intermediate_lambda"
-        )(student_input)
+        )(hidden_dense_out) # Lambda now takes output of the new Dense layer
+
         output_logits = keras.layers.Dense(5, name="student_output_logits_lambda")(intermediate_out)
         student_model_lambda = keras.Model(inputs=student_input, outputs=output_logits, name="student_lambda")
         _ = student_model_lambda(self.dummy_x) # Build
@@ -444,53 +462,93 @@ class DistillerTest(TestCase):
             _ = distiller.train_step(data=(self.dummy_x,))
             self.assertIsNotNone(feature_strategy.projection_layer)
             # Expected units: Lambda output's last dimension
-            expected_units = student_model_lambda.get_layer("student_intermediate_lambda").output_shape[-1]
+            # For Lambda layers, accessing .output.shape is more robust than .output_shape
+            lambda_layer = student_model_lambda.get_layer("student_intermediate_lambda")
+            if hasattr(lambda_layer, 'output_shape') and lambda_layer.output_shape is not None:
+                 expected_units = lambda_layer.output_shape[-1]
+            else: # Fallback to output tensor's shape
+                 expected_units = lambda_layer.output.shape[-1]
             self.assertEqual(feature_strategy.projection_layer.units, expected_units)
         except ValueError as e:
             self.fail(f"FeatureDistillation with projection failed to infer dim for Lambda: {e}")
 
     def test_feature_distillation_projection_dim_inference_fail_mocked(self):
-        # Mock a layer to have output_shape[-1] as None to trigger the error
-        student_model_mock = self._create_simple_model(name="student_mock_shape")
-        _ = student_model_mock(self.dummy_x) # Build
-
-        original_get_layer = student_model_mock.get_layer
-
+        # Define MockLayer directly in the test for clarity and specific behavior
         class MockLayerWithNoneShapeDim(keras.layers.Layer):
-            def __init__(self, original_layer, **kwargs):
-                super().__init__(name=original_layer.name, dtype=original_layer.dtype)
-                self._original_layer_instance = original_layer
-                # Assuming original_layer is built and has .output.shape
-                self._dynamic_output_shape = list(original_layer.output.shape) # TensorShape is iterable
-                self._dynamic_output_shape[-1] = None
+            def __init__(self, original_layer_instance_for_call_and_dtype, desired_output_shape_tuple, **kwargs):
+                super().__init__(name=kwargs.pop('name', None),
+                                 dtype=original_layer_instance_for_call_and_dtype.dtype,
+                                 **kwargs)
+                self._original_layer_instance_for_call = original_layer_instance_for_call_and_dtype
+                self._desired_output_shape_tuple = desired_output_shape_tuple # e.g., (None, None)
+
+            # This property is consulted by Keras for shape information.
             @property
-            def output_shape(self): return tuple(self._dynamic_output_shape)
-            def call(self, inputs, *args, **kwargs): return self._original_layer_instance(inputs, *args, **kwargs)
+            def output_shape(self):
+                return self._desired_output_shape_tuple
+
+            def call(self, inputs, *args, **kwargs):
+                return self._original_layer_instance_for_call(inputs, *args, **kwargs)
+
             def build(self, input_shape):
-                if hasattr(self._original_layer_instance, 'build') and not self._original_layer_instance.built:
-                    self._original_layer_instance.build(input_shape)
-                super().build(input_shape)
+                if hasattr(self._original_layer_instance_for_call, 'build') and \
+                   not self._original_layer_instance_for_call.built:
+                    # Build the wrapped layer with the actual input shape it will receive.
+                    self._original_layer_instance_for_call.build(input_shape)
+                super().build(input_shape) # Important to call base Layer's build
 
-        def mock_get_layer(name):
-            layer = original_get_layer(name)
-            if name == "student_mock_shape_intermediate_features":
-                return MockLayerWithNoneShapeDim(layer)
-            return layer
+            # compute_output_shape is often required by Keras for layers with dynamic shapes
+            # or when output_shape is a property.
+            def compute_output_shape(self, input_shape):
+                # For this mock, output_shape is fixed by desired_output_shape_tuple.
+                # It needs to be a tuple of (batch_dim, feature_dim_1, ..., feature_dim_n)
+                # The batch_dim is usually taken from input_shape[0].
+                return (input_shape[0],) + self._desired_output_shape_tuple[1:]
 
-        student_model_mock.get_layer = mock_get_layer
+
+        # For MockLayerWithNoneShapeDim to correctly use a wrapped layer instance for its `call` method,
+        # that wrapped instance should be compatible with the input it will receive (16 features from the Dense(16) layer).
+        # We create a fresh Dense layer instance that will adapt to this input.
+        # The number of units (e.g., 8) is somewhat arbitrary, as we primarily mock its output_shape.
+        fresh_dense_for_mock_call = keras.layers.Dense(8, name="fresh_dense_for_mock_call_internal")
+
+        # Define the desired output shape for the mock layer: (batch_size, None)
+        mock_feature_dim = None
+        desired_mock_shape_tuple = (None, mock_feature_dim)
+
+        # Construct student_model_with_mock manually, inserting MockLayerWithNoneShapeDim
+        student_input = keras.Input(shape=(10,), name="student_mock_direct_input")
+        # This Dense layer will output (None, 16)
+        x = keras.layers.Dense(16, activation="relu", name="student_mock_direct_hidden_0")(student_input)
+
+        intermediate_layer_name = "student_mock_shape_intermediate_features" # Name strategy will look for
+        mock_intermediate_layer = MockLayerWithNoneShapeDim(
+            original_layer_instance_for_call_and_dtype=fresh_dense_for_mock_call, # Use the fresh, adaptable Dense layer
+            desired_output_shape_tuple=desired_mock_shape_tuple,
+            name=intermediate_layer_name
+        )
+        # The mock_intermediate_layer will receive (None, 16) as input.
+        # Its `call` method will pass this to `fresh_dense_for_mock_call`.
+        # `fresh_dense_for_mock_call` will build with input_shape=(None, 16) and output (None, 8).
+        # However, `mock_intermediate_layer.output_shape` will report (None, None).
+        x = mock_intermediate_layer(x)
+
+        # The student model's output is the direct output of the mock layer.
+        student_model_with_mock = keras.Model(inputs=student_input, outputs=x, name="student_with_mock_layer_direct_output")
+
+        _ = student_model_with_mock(self.dummy_x) # Build the model
 
         feature_strategy_fail = FeatureDistillation(
-            teacher_layer="teacher_intermediate_features",
-            student_layer="student_mock_shape_intermediate_features",
+            teacher_layer="teacher_intermediate_features", # From self.teacher_model
+            student_layer=intermediate_layer_name,       # Name of our mock layer instance
             loss_fn=keras.losses.MeanSquaredError(), weight=1.0, projection=True,
         )
-        distiller_fail = Distiller(student=student_model_mock, teacher=self.teacher_model, strategies=[feature_strategy_fail])
+
+        distiller_fail = Distiller(student=student_model_with_mock, teacher=self.teacher_model, strategies=[feature_strategy_fail])
         distiller_fail.compile(optimizer=keras.optimizers.Adam())
 
         with self.assertRaisesRegex(ValueError, "Cannot automatically infer `student_output_dim` for projection"):
             distiller_fail.train_step(data=(self.dummy_x,))
-
-        student_model_mock.get_layer = original_get_layer # Restore
 
 
 if __name__ == "__main__":

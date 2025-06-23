@@ -272,46 +272,31 @@ class Distiller(keras.Model):
         # super().metrics should already contain metrics passed to compile().
         # We need to ensure our custom trackers are also included.
 
-        # Start with metrics from the parent class.
-        # Keras Model base class should already collect:
-        # 1. Losses (from compile)
-        # 2. Metrics (from compile)
-        # 3. Metrics added via self.add_metric()
-        # 4. Metrics that are attributes of the model or its layers if they are Metric instances.
+        # This property should return a list of all Metric objects the model tracks.
+        metrics_map = {}
 
-        # Start with our custom trackers as they are explicitly part of this model's logic
-        all_metrics = [
+        # 1. Add metrics explicitly passed by the user to `compile()`.
+        #    Keras stores these as actual metric objects in self.compiled_metrics.metrics.
+        #    These should take precedence if there's a name clash with auto-generated ones.
+        if hasattr(self, 'compiled_metrics') and \
+           self.compiled_metrics is not None and \
+           hasattr(self.compiled_metrics, 'metrics') and \
+           self.compiled_metrics.metrics is not None:
+            for metric_obj in self.compiled_metrics.metrics: # This should be a list of Metric instances
+                if hasattr(metric_obj, 'name') and isinstance(metric_obj, keras.metrics.Metric):
+                    metrics_map[metric_obj.name] = metric_obj # Add the compiled metric
+
+        # 2. Add/Ensure our custom loss trackers are present.
+        #    These will override any compiled metric if names happened to clash (e.g., if user passed a metric called 'total_loss').
+        custom_trackers = [
             self.total_loss_tracker,
             self.student_loss_tracker,
-            self.distillation_loss_tracker
+            self.distillation_loss_tracker,
         ]
-        # Add metrics from compile()
-        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
-            compiled_metric_instances = []
-            # Try to access the list of metric objects from the compiled_metrics helper
-            # Keras 3 structure: self.compiled_metrics.metrics should be the list of actual metric instances
-            if hasattr(self.compiled_metrics, 'metrics') and isinstance(self.compiled_metrics.metrics, list):
-                compiled_metric_instances = self.compiled_metrics.metrics
-            # Fallback for older Keras versions or different internal structures if needed, e.g., _user_metrics
-            # elif hasattr(self.compiled_metrics, '_user_metrics') and isinstance(self.compiled_metrics._user_metrics, list):
-            #      compiled_metric_instances = self.compiled_metrics._user_metrics
+        for tracker in custom_trackers:
+            metrics_map[tracker.name] = tracker # Add/overwrite with custom tracker
 
-            existing_names = {m.name for m in all_metrics}
-            for cm in compiled_metric_instances:
-                if hasattr(cm, 'name') and cm.name not in existing_names:
-                    all_metrics.append(cm)
-
-        # It's also possible super().metrics already contains everything correctly.
-        # If the above explicit construction causes issues or misses things like the loss,
-        # then relying on super().metrics and ensuring trackers are added if not present might be better.
-        # For now, this explicit construction tries to be comprehensive.
-        # However, the pytest output `Current metrics: ['loss', 'compile_metrics', ...]`
-        # indicates `super().metrics` might be returning string names or wrapper objects
-        # instead of actual metric instances in some contexts.
-        # The initial problem was that `super().metrics` didn't seem to include the compiled `CategoricalAccuracy`.
-        # Let's stick to a more explicit build of `all_metrics` including our trackers,
-        # and the ones from `self.compiled_metrics.metrics`.
-        return all_metrics
+        return list(metrics_map.values())
 
     # get_metrics_result and reset_states are typically handled by the base Model
     # by virtue of including trackers in self.metrics.
