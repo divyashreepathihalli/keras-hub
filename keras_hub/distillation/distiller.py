@@ -273,15 +273,14 @@ class Distiller(keras.Model):
         # We need to ensure our custom trackers are also included.
 
         # Start with metrics from the parent class.
-        # In Keras 3, this list should be mutable or new list should be created.
-        metrics = list(super().metrics) # Make a mutable copy
-
-        # Add our custom trackers if they are not already there by name.
-        current_metric_names = [m.name for m in metrics]
-        for tracker in custom_trackers:
-            if tracker.name not in current_metric_names:
-                metrics.append(tracker)
-        return metrics
+        # Keras Model base class should already collect:
+        # 1. Losses (from compile)
+        # 2. Metrics (from compile)
+        # 3. Metrics added via self.add_metric()
+        # 4. Metrics that are attributes of the model or its layers if they are Metric instances.
+        # Our trackers (student_loss_tracker, etc.) are attributes and Metric instances,
+        # so they should be automatically included by super().metrics.
+        return super().metrics
 
     # get_metrics_result and reset_states are typically handled by the base Model
     # by virtue of including trackers in self.metrics.
