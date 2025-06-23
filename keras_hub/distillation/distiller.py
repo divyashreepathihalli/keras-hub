@@ -269,15 +269,19 @@ class Distiller(keras.Model):
         ]
         # Avoid duplicating trackers if they are somehow already in base_metrics
         # (e.g., if Keras auto-adds attributes that are Metric instances).
-        # A simple way is to convert to a list of names and check.
-        # For now, direct concatenation is often fine, but a more robust approach:
-        existing_metric_names = [m.name for m in base_metrics]
-        final_metrics = list(base_metrics) # Start with a copy
+        # super().metrics should already contain metrics passed to compile().
+        # We need to ensure our custom trackers are also included.
 
+        # Start with metrics from the parent class.
+        # In Keras 3, this list should be mutable or new list should be created.
+        metrics = list(super().metrics) # Make a mutable copy
+
+        # Add our custom trackers if they are not already there by name.
+        current_metric_names = [m.name for m in metrics]
         for tracker in custom_trackers:
-            if tracker.name not in existing_metric_names:
-                final_metrics.append(tracker)
-        return final_metrics
+            if tracker.name not in current_metric_names:
+                metrics.append(tracker)
+        return metrics
 
     # get_metrics_result and reset_states are typically handled by the base Model
     # by virtue of including trackers in self.metrics.
@@ -299,9 +303,9 @@ class Distiller(keras.Model):
 
     def reset_states(self):
         # Reset custom metric trackers
-        self.student_loss_tracker.reset_states()
-        self.distillation_loss_tracker.reset_states()
-        self.total_loss_tracker.reset_states()
+        self.student_loss_tracker.reset_state()
+        self.distillation_loss_tracker.reset_state()
+        self.total_loss_tracker.reset_state()
         # Call parent's reset_states for compiled metrics and other internal states
         super().reset_states()
 

@@ -155,23 +155,25 @@ class FeatureDistillation(BaseDistillationStrategy):
             # Determine student_output_dim for the projection layer
             if self.student_output_dim_for_projection is not None:
                 student_output_dim = self.student_output_dim_for_projection
-            elif hasattr(student_layer_output, 'shape') and student_layer_output.shape[-1] is not None:
+            elif hasattr(student_layer_output, 'shape') and student_layer_output.shape.rank > 0 and student_layer_output.shape[-1] is not None:
                  student_output_dim = student_layer_output.shape[-1]
             else:
                 # This case might occur if the output shape is dynamic or not fully defined.
-                # We'll attempt to build the projection layer lazily in compute_loss,
-                # or rely on the user having specified student_output_dim_for_projection.
-                # For now, we prepare it without a specific unit count if not inferable here.
-                # A more robust solution might require explicit user input if shape inference fails.
+                # Try to get the shape from the layer's output tensor symbolic shape
                 try:
-                    # Attempt to get shape from student model's layer if possible
-                    student_output_dim = student_model.get_layer(self.student_layer_name).output_shape[-1]
-                    if student_output_dim is None: # Still None, e.g. for dynamic shapes
-                         raise AttributeError
-                except (AttributeError, IndexError):
+                    student_layer_instance = student_model.get_layer(self.student_layer_name)
+                    # Ensure the layer is part of a built model and has an output tensor
+                    if hasattr(student_layer_instance, 'output') and hasattr(student_layer_instance.output, 'shape'):
+                        student_output_dim = student_layer_instance.output.shape[-1]
+                        if student_output_dim is None: # Symbolic shape might still have None
+                            raise ValueError("Inferred student output dimension is None.")
+                    else:
+                        raise ValueError("Student layer has no `output` attribute or `output.shape`.")
+                except Exception as e: # Catch broader exceptions during this inference
                      raise ValueError(
-                        "Cannot automatically infer `student_output_dim` for projection in FeatureDistillation. "
-                        "Please specify `student_output_dim_for_projection` if teacher and student "
+                        f"Cannot automatically infer `student_output_dim` for projection in FeatureDistillation "
+                        f"for layer '{self.student_layer_name}'. Error: {e}. "
+                        "Please specify `student_output_dim_for_projection` or ensure the student layer "
                         "feature dimensions differ and projection is enabled, or ensure student layer has a defined output shape."
                     )
 
