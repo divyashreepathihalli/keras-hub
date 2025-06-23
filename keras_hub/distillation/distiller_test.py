@@ -112,7 +112,8 @@ class DistillerTest(TestCase):
         )
         self.assertIsNotNone(distiller.student_loss_fn)
         self.assertIsNotNone(distiller.distillation_loss_fn)
-        self.assertTrue(len(distiller.compiled_metrics.metrics) > 0)
+        # Check if the compiled metric (CategoricalAccuracy) is part of the model's metrics
+        self.assertTrue(any(isinstance(m, keras.metrics.CategoricalAccuracy) for m in distiller.metrics))
         self.assertEqual(distiller.alpha, 0.3)
         self.assertEqual(distiller.temperature, 2.5)
 
@@ -396,7 +397,13 @@ class DistillerTest(TestCase):
     def test_feature_distillation_projection_dim_inference_works_for_lambda(self):
         # Test that projection dim can be inferred for a Lambda layer with a defined output shape
         student_input = keras.Input(shape=(10,), name="student_input_lambda")
-        intermediate_out = keras.layers.Lambda(lambda t: t[:, :self.teacher_model.get_layer("teacher_intermediate_features").output_shape[-1] // 2 ], name="student_intermediate_lambda")(student_input)
+        # Define the output dimension for the lambda layer explicitly
+        lambda_output_dim = self.teacher_model.get_layer("teacher_intermediate_features").output_shape[-1] // 2
+        intermediate_out = keras.layers.Lambda(
+            lambda t: t[:, :lambda_output_dim],
+            output_shape=(lambda_output_dim,), # Explicitly provide output_shape
+            name="student_intermediate_lambda"
+        )(student_input)
         output_logits = keras.layers.Dense(5, name="student_output_logits_lambda")(intermediate_out)
         student_model_lambda = keras.Model(inputs=student_input, outputs=output_logits, name="student_lambda")
         _ = student_model_lambda(self.dummy_x) # Build

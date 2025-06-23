@@ -242,74 +242,16 @@ class Distiller(keras.Model):
 
         return total_loss
 
-    def train_step(self, data):
-        # Unpack the data. `y_true` can be None if pure distillation (unlabeled data)
-        # or if student_loss_fn is not provided.
-        if len(data) == 1: # Assume data is x only
-            x, y_true = data[0], None
-        elif len(data) == 2:
-            x, y_true = data
-        else: # len(data) == 3 could be (x, y, sample_weight), but we ignore sample_weight for now
-             x, y_true = data[0], data[1]
-
-
-        # Keras 3 automatically handles data unpacking if it's a dict, tf.data.Dataset, etc.
-        # The above is a simplified version assuming tuple/list input.
-        # More robust unpacking might be needed if directly using this train_step
-        # outside of model.fit() which handles data adapter logic.
-        # However, model.fit() will typically provide data as (x,) or (x,y) or (x,y,sw).
-
-        # Forward pass through student and compute all losses under GradientTape
-        with keras.backend.GradientTape() as tape:
-            y_pred = self.student(x, training=True)
-            # compute_loss needs to be called with training=True context
-            loss = self.compute_loss(x=x, y=y_true, y_pred=y_pred, sample_weight=None, training=True)
-
-        # Compute gradients and update student weights
-        # Only student's trainable variables should be updated.
-        trainable_vars = self.student.trainable_variables
-        if not trainable_vars:
-            raise ValueError(
-                "The student model does not have any trainable variables. "
-                "Ensure your student model is built correctly and not frozen."
-            )
-
-        gradients = tape.gradient(loss, trainable_vars)
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
-
-        # Update compiled metrics (these are for student's direct output vs y_true)
-        # The compiled_metrics are passed in model.compile(metrics=...)
-        # They are only updated if y_true is available.
-        if y_true is not None and self.compiled_metrics is not None:
-             self.compiled_metrics.update_state(y_true, y_pred) # sample_weight can be added if supported
-
-        # Return a dict of metrics including our custom loss trackers
-        # The `loss` key here will be the total_loss from total_loss_tracker.
-        results = {m.name: m.result() for m in self.metrics} # self.metrics includes the loss trackers
-        return results
-
-    def test_step(self, data):
-        # Unpack the data, similar to train_step
-        if len(data) == 1:
-            x, y_true = data[0], None
-        elif len(data) == 2:
-            x, y_true = data
-        else:
-            x, y_true = data[0], data[1]
-
-        # Forward pass through student (in inference mode)
-        y_pred = self.student(x, training=False)
-
-        # Compute losses (in inference mode for loss calculation)
-        # This will update our loss trackers (student_loss, distillation_loss, total_loss)
-        self.compute_loss(x=x, y=y_true, y_pred=y_pred, sample_weight=None, training=False)
-
-        # Update compiled metrics (if y_true is available)
-        if y_true is not None and self.compiled_metrics is not None:
-            self.compiled_metrics.update_state(y_true, y_pred)
-
-        results = {m.name: m.result() for m in self.metrics}
-        return results
+    # train_step and test_step are removed to rely on the base keras.Model versions.
+    # The base Model's train_step will:
+    # 1. Call self() which is self.student() via Distiller.call().
+    # 2. Call self.compute_loss() with the student's predictions.
+    # 3. Compute gradients with respect to self.trainable_variables (which are student's vars).
+    # 4. Apply gradients using self.optimizer.
+    # 5. Update metrics (including our custom ones returned by the metrics property).
+    #
+    # The base Model's test_step will similarly call self() and self.compute_loss()
+    # in inference mode and update metrics.
 
     @property
     def metrics(self):
@@ -317,14 +259,25 @@ class Distiller(keras.Model):
         # This ensures they are reset correctly and displayed during training/evaluation.
         # `compiled_metrics` are those passed by the user to `compile()`.
         # `loss_trackers` are our internal ones.
-        metrics_list = [
+        # In Keras 3, super().metrics should already include compiled_metrics.
+        # We add our custom trackers to this list.
+        base_metrics = super().metrics
+        custom_trackers = [
             self.total_loss_tracker,
             self.student_loss_tracker,
             self.distillation_loss_tracker
         ]
-        if self.compiled_metrics is not None: # compiled_metrics is a MetricList object or None
-            metrics_list += self.compiled_metrics.metrics # Access the list of metrics
-        return metrics_list
+        # Avoid duplicating trackers if they are somehow already in base_metrics
+        # (e.g., if Keras auto-adds attributes that are Metric instances).
+        # A simple way is to convert to a list of names and check.
+        # For now, direct concatenation is often fine, but a more robust approach:
+        existing_metric_names = [m.name for m in base_metrics]
+        final_metrics = list(base_metrics) # Start with a copy
+
+        for tracker in custom_trackers:
+            if tracker.name not in existing_metric_names:
+                final_metrics.append(tracker)
+        return final_metrics
 
     # get_metrics_result and reset_states are typically handled by the base Model
     # by virtue of including trackers in self.metrics.
