@@ -278,9 +278,40 @@ class Distiller(keras.Model):
         # 2. Metrics (from compile)
         # 3. Metrics added via self.add_metric()
         # 4. Metrics that are attributes of the model or its layers if they are Metric instances.
-        # Our trackers (student_loss_tracker, etc.) are attributes and Metric instances,
-        # so they should be automatically included by super().metrics.
-        return super().metrics
+
+        # Start with our custom trackers as they are explicitly part of this model's logic
+        all_metrics = [
+            self.total_loss_tracker,
+            self.student_loss_tracker,
+            self.distillation_loss_tracker
+        ]
+        # Add metrics from compile()
+        if hasattr(self, 'compiled_metrics') and self.compiled_metrics is not None:
+            compiled_metric_instances = []
+            # Try to access the list of metric objects from the compiled_metrics helper
+            # Keras 3 structure: self.compiled_metrics.metrics should be the list of actual metric instances
+            if hasattr(self.compiled_metrics, 'metrics') and isinstance(self.compiled_metrics.metrics, list):
+                compiled_metric_instances = self.compiled_metrics.metrics
+            # Fallback for older Keras versions or different internal structures if needed, e.g., _user_metrics
+            # elif hasattr(self.compiled_metrics, '_user_metrics') and isinstance(self.compiled_metrics._user_metrics, list):
+            #      compiled_metric_instances = self.compiled_metrics._user_metrics
+
+            existing_names = {m.name for m in all_metrics}
+            for cm in compiled_metric_instances:
+                if hasattr(cm, 'name') and cm.name not in existing_names:
+                    all_metrics.append(cm)
+
+        # It's also possible super().metrics already contains everything correctly.
+        # If the above explicit construction causes issues or misses things like the loss,
+        # then relying on super().metrics and ensuring trackers are added if not present might be better.
+        # For now, this explicit construction tries to be comprehensive.
+        # However, the pytest output `Current metrics: ['loss', 'compile_metrics', ...]`
+        # indicates `super().metrics` might be returning string names or wrapper objects
+        # instead of actual metric instances in some contexts.
+        # The initial problem was that `super().metrics` didn't seem to include the compiled `CategoricalAccuracy`.
+        # Let's stick to a more explicit build of `all_metrics` including our trackers,
+        # and the ones from `self.compiled_metrics.metrics`.
+        return all_metrics
 
     # get_metrics_result and reset_states are typically handled by the base Model
     # by virtue of including trackers in self.metrics.

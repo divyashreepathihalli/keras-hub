@@ -157,26 +157,41 @@ class FeatureDistillation(BaseDistillationStrategy):
                 student_output_dim = self.student_output_dim_for_projection
             elif hasattr(student_layer_output, 'shape') and student_layer_output.shape is not None and \
                  len(student_layer_output.shape) > 0 and student_layer_output.shape[-1] is not None:
-                 student_output_dim = student_layer_output.shape[-1]
+                 student_output_dim = student_layer_output.shape[-1] # student_layer_output is a tensor here
             else:
                 # This case might occur if the output shape is dynamic or not fully defined.
-                # Try to get the shape from the layer's output tensor symbolic shape
                 try:
                     student_layer_instance = student_model.get_layer(self.student_layer_name)
-                    # Ensure the layer is part of a built model and has an output tensor
-                    if hasattr(student_layer_instance, 'output') and hasattr(student_layer_instance.output, 'shape'):
+                    # Try layer's output_shape property first (good for mocks or uncalled layers with static shape)
+                    if hasattr(student_layer_instance, 'output_shape'):
+                        shape_tuple = student_layer_instance.output_shape
+                        if shape_tuple is not None and len(shape_tuple) > 0:
+                            if shape_tuple[-1] is not None:
+                                student_output_dim = shape_tuple[-1]
+                            else: # Last dim is None - this is what the mock test wants to trigger
+                                raise ValueError(f"Last dimension of layer.output_shape is None for layer '{self.student_layer_name}'.")
+                        # If .output_shape didn't work or was inconclusive, try .output.shape (for called layers in graph)
+                        elif hasattr(student_layer_instance, 'output') and hasattr(student_layer_instance.output, 'shape') and \
+                             student_layer_instance.output.shape[-1] is not None:
+                            student_output_dim = student_layer_instance.output.shape[-1] # This is a tf.Dimension or int
+                            if student_output_dim is None: # Keras sometimes returns tf.Dimension(None)
+                                 raise ValueError(f"Inferred student output dimension from .output.shape is None for layer '{self.student_layer_name}'.")
+                        else:
+                            raise ValueError(f"Layer '{self.student_layer_name}' provides no conclusive .output_shape or .output.shape for projection.")
+                    # Fallback if no .output_shape attr, try .output.shape directly
+                    elif hasattr(student_layer_instance, 'output') and hasattr(student_layer_instance.output, 'shape') and \
+                         student_layer_instance.output.shape[-1] is not None:
                         student_output_dim = student_layer_instance.output.shape[-1]
-                        if student_output_dim is None: # Symbolic shape might still have None
-                            raise ValueError("Inferred student output dimension is None.")
+                        if student_output_dim is None:
+                             raise ValueError(f"Inferred student output dimension from .output.shape is None for layer '{self.student_layer_name}'.")
                     else:
-                        raise ValueError("Student layer has no `output` attribute or `output.shape`.")
-                except Exception as e: # Catch broader exceptions during this inference
-                     raise ValueError(
-                        f"Cannot automatically infer `student_output_dim` for projection in FeatureDistillation "
-                        f"for layer '{self.student_layer_name}'. Error: {e}. "
-                        "Please specify `student_output_dim_for_projection` or ensure the student layer "
-                        "feature dimensions differ and projection is enabled, or ensure student layer has a defined output shape."
-                    )
+                        raise ValueError(f"Cannot determine output shape for projection for layer '{self.student_layer_name}'.")
+
+                except ValueError as ve:
+                     # Re-raise to be caught by the test's assertRaisesRegex
+                     raise ValueError(f"Cannot automatically infer `student_output_dim` for projection for layer '{self.student_layer_name}'. Reason: {ve}") from None
+                except Exception as e: # Catch other unexpected errors
+                     raise ValueError(f"Unexpected error during student_output_dim inference for layer '{self.student_layer_name}': {e}") from e
 
             self.projection_layer = keras.layers.Dense(student_output_dim, name=f"projection_{self.teacher_layer_name}_to_{self.student_layer_name}")
 
