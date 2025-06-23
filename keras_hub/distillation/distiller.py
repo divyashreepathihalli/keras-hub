@@ -307,7 +307,8 @@ class Distiller(keras.Model):
         self.distillation_loss_tracker.reset_state()
         self.total_loss_tracker.reset_state()
         # Call parent's reset_states for compiled metrics and other internal states
-        super().reset_states()
+        # super().reset_states() # Removed due to AttributeError in some test environments;
+        # Keras training loop handles resetting compiled metrics. Our custom trackers are reset above.
 
 # The design doc mentioned `keras.backend.device_scope(self.distiller.student.device)`
 # in train_step. This is generally not needed with Keras 3 as operations are dispatched

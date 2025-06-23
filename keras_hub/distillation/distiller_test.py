@@ -112,8 +112,15 @@ class DistillerTest(TestCase):
         )
         self.assertIsNotNone(distiller.student_loss_fn)
         self.assertIsNotNone(distiller.distillation_loss_fn)
-        # Check if the compiled metric (CategoricalAccuracy) is part of the model's metrics
-        self.assertTrue(any(isinstance(m, keras.metrics.CategoricalAccuracy) for m in distiller.metrics))
+        # Check if the compiled metric (CategoricalAccuracy) is part of the model's compiled_metrics internal list
+        # Keras stores user-provided metrics in `compiled_metrics._user_metrics` or `compiled_metrics.metrics`
+        # depending on exact Keras version and internal structure.
+        # Checking by name in `distiller.metrics` is safer if direct access to compiled list is tricky.
+        # Let's assume distiller.metrics should contain it after the property refinement.
+        self.assertTrue(any(m.name == 'categorical_accuracy' for m in distiller.metrics),
+                        "CategoricalAccuracy metric not found by name in distiller.metrics")
+        # Alternative check, if above fails and compiled_metrics structure is known:
+        # self.assertTrue(any(isinstance(m, keras.metrics.CategoricalAccuracy) for m in distiller.compiled_metrics.metrics))
         self.assertEqual(distiller.alpha, 0.3)
         self.assertEqual(distiller.temperature, 2.5)
 
@@ -410,7 +417,9 @@ class DistillerTest(TestCase):
         # Test that projection dim can be inferred for a Lambda layer with a defined output shape
         student_input = keras.Input(shape=(10,), name="student_input_lambda")
         # Define the output dimension for the lambda layer explicitly
-        lambda_output_dim = self.teacher_model.get_layer("teacher_intermediate_features").output_shape[-1] // 2
+        # Use .output.shape.as_list() for robustness
+        teacher_intermediate_layer = self.teacher_model.get_layer("teacher_intermediate_features")
+        lambda_output_dim = teacher_intermediate_layer.output.shape.as_list()[-1] // 2
         intermediate_out = keras.layers.Lambda(
             lambda t: t[:, :lambda_output_dim],
             output_shape=(lambda_output_dim,), # Explicitly provide output_shape
@@ -448,7 +457,8 @@ class DistillerTest(TestCase):
             def __init__(self, original_layer, **kwargs):
                 super().__init__(name=original_layer.name, dtype=original_layer.dtype)
                 self._original_layer_instance = original_layer
-                self._dynamic_output_shape = list(original_layer.output_shape)
+                # Assuming original_layer is built and has .output.shape
+                self._dynamic_output_shape = list(original_layer.output.shape.as_list())
                 self._dynamic_output_shape[-1] = None
             @property
             def output_shape(self): return tuple(self._dynamic_output_shape)

@@ -155,7 +155,8 @@ class FeatureDistillation(BaseDistillationStrategy):
             # Determine student_output_dim for the projection layer
             if self.student_output_dim_for_projection is not None:
                 student_output_dim = self.student_output_dim_for_projection
-            elif hasattr(student_layer_output, 'shape') and student_layer_output.shape.rank > 0 and student_layer_output.shape[-1] is not None:
+            elif hasattr(student_layer_output, 'shape') and student_layer_output.shape is not None and \
+                 len(student_layer_output.shape) > 0 and student_layer_output.shape[-1] is not None:
                  student_output_dim = student_layer_output.shape[-1]
             else:
                 # This case might occur if the output shape is dynamic or not fully defined.
