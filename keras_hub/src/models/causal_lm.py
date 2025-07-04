@@ -254,24 +254,51 @@ class CausalLM(Task):
         the input, it is removed from the output (so generate can be string in,
         string out).
         """
+        # If outputs are already Python native types (strings or dicts after postprocessing),
+        # we mainly need to handle the case where a batch dimension was artificially added.
+        if not outputs:
+            return [] if not input_is_scalar else None # Or appropriate empty value
 
-        def normalize(x):
-            if isinstance(x[0], list):
-                outputs = []
-                for batch in x:
-                    for e in batch:
-                        outputs.append(e)
-                return outputs[0] if input_is_scalar else outputs
-            outputs = ops.concatenate(x, axis=0)
-            outputs = ops.squeeze(outputs, 0) if input_is_scalar else outputs
-            return ops.convert_to_numpy(outputs)
+        # Check if the elements are tensors or already Python native types
+        # (e.g. string or dict from function call parsing)
+        first_element = outputs[0]
+        if isinstance(first_element, (str, dict)) or not hasattr(first_element, "shape"):
+            # Outputs are likely already processed Python types.
+            # If input was scalar, and we have a list of one item, return that item.
+            if input_is_scalar and isinstance(outputs, list) and len(outputs) == 1:
+                return outputs[0]
+            # Otherwise, return the list as is (batched output of Python types)
+            return outputs
 
-        if isinstance(outputs[0], dict):
-            normalized = {}
-            for key in outputs[0]:
-                normalized[key] = normalize([x[key] for x in outputs])
-            return normalized
-        return normalize([x for x in outputs])
+        # Original logic for tensor outputs (e.g., if preprocessor was None or postprocess returned tensors)
+        def normalize_tensor_list(tensor_list):
+            if not tensor_list: # Should not happen if outputs is not empty
+                return []
+            # If elements are lists themselves (e.g. ragged output from tokenizer before padding)
+            if isinstance(tensor_list[0], list):
+                # This case might need more specific handling if it occurs with tensor_list[0] being a list of tensors.
+                # For now, assuming if tensor_list[0] is list, it's a list of already processed items.
+                # This part of original logic might be less relevant if postprocess always yields final types or flat tensors.
+                flattened_list = []
+                for batch_item_list in tensor_list: # tensor_list is like [[item1_batch1, item2_batch1], [item1_batch2, ...]]
+                    for item in batch_item_list:
+                        flattened_list.append(item)
+                return flattened_list[0] if input_is_scalar and len(flattened_list) == 1 else flattened_list
+
+            # Assuming tensor_list is a list of tensors/arrays that can be concatenated
+            concatenated_outputs = ops.concatenate(tensor_list, axis=0)
+            squeezed_outputs = ops.squeeze(concatenated_outputs, 0) if input_is_scalar else concatenated_outputs
+            return ops.convert_to_numpy(squeezed_outputs)
+
+        if isinstance(first_element, dict): # Should be caught by earlier check if dicts are Python dicts
+            # This path implies dicts of tensors, e.g. {"token_ids": tensor, "padding_mask": tensor}
+            normalized_dict = {}
+            for key in first_element.keys():
+                items_for_key = [output_item[key] for output_item in outputs]
+                normalized_dict[key] = normalize_tensor_list(items_for_key)
+            return normalized_dict
+
+        return normalize_tensor_list(outputs)
 
     def generate(
         self,
@@ -490,118 +517,3 @@ class CausalLM(Task):
 
 
         return self._normalize_generate_outputs(final_outputs, input_is_scalar)
-
-        This method generates text based on given `inputs`. The sampling method
-        used for generation can be set via the `compile()` method.
-
-        If `inputs` are a `tf.data.Dataset`, outputs will be generated
-        "batch-by-batch" and concatenated. Otherwise, all inputs will be handled
-        as a single batch.
-
-        If a `preprocessor` is attached to the model, `inputs` will be
-        preprocessed inside the `generate()` function and should match the
-        structure expected by the `preprocessor` layer (usually raw strings).
-        If a `preprocessor` is not attached, inputs should match the structure
-        expected by the `backbone`. See the example usage above for a
-        demonstration of each.
-
-        Args:
-            inputs: python data, tensor data, or a `tf.data.Dataset`. If a
-                `preprocessor` is attached to the model, `inputs` should match
-                the structure expected by the `preprocessor` layer. If a
-                `preprocessor` is not attached, `inputs` should match the
-                structure expected the `backbone` model.
-            max_length: Optional. int. The max length of the generated sequence.
-                Will default to the max configured `sequence_length` of the
-                `preprocessor`. If `preprocessor` is `None`, `inputs` should be
-                should be padded to the desired maximum length and this argument
-                will be ignored.
-            stop_token_ids: Optional. `None`, "auto", or tuple of token ids.
-                Defaults to "auto" which uses the
-                `preprocessor.tokenizer.end_token_id`. Not specifying a
-                processor will produce an error. None stops generation after
-                generating `max_length` tokens. You may also specify a list of
-                token id's the model should stop on. Note that sequences of
-                tokens will each be interpreted as a stop token, multi-token
-                stop sequences are not supported.
-            strip_prompt: Optional. By default, generate() returns the full
-                prompt followed by its completion generated by the model. If
-                this option is set to True, only the newly generated text is
-                returned.
-        """
-        # Setup our three main passes.
-        # 1. Optionally preprocessing strings to dense integer tensors.
-        # 2. Generate new tokens via a compiled function on dense tensors.
-        # 3. Optionally postprocess dense integer tensors back to string.
-        generate_function = self.make_generate_function()
-
-        if self.preprocessor is None and stop_token_ids == "auto":
-            raise ValueError(
-                "A `preprocessor` must be attached to the model if "
-                '`stop_token_ids="auto"`. Currently `preprocessor=None`. To '
-                "call `generate()` with preprocessing detached, either pass "
-                "`stop_token_ids=None` to always generate until `max_length` "
-                "or pass a tuple of token ids that should terminate generation "
-                "as `stop_token_ids`."
-            )
-        elif stop_token_ids == "auto":
-            stop_token_ids = [self.preprocessor.tokenizer.end_token_id]
-            # Some models like Llama3 use two end tokens: <|eot_id|> in
-            # "instruct" versions and <|end_of_text|> in others.
-            if hasattr(self.preprocessor.tokenizer, "end_token2_id"):
-                stop_token_ids.append(self.preprocessor.tokenizer.end_token2_id)
-
-        def preprocess(x):
-            return self.preprocessor.generate_preprocess(
-                x, sequence_length=max_length
-            )
-
-        def generate(x):
-            return generate_function(x, stop_token_ids=stop_token_ids)
-
-        def strip_prompt_function(x, prompt):
-            # This function removes the prompt from the generated
-            # response, in a batch-friendly fashion.
-            y = {}
-            prompt_mask = prompt["padding_mask"]
-            seq_len = prompt_mask.shape[1]
-
-            # We need to shift every output sequence by the size of the prompt.
-            shifts = -ops.sum(ops.cast(prompt_mask, "int"), axis=1) % seq_len
-            ix = ops.arange(seq_len, dtype="int")
-            ix = ops.expand_dims(ix, axis=0) - ops.expand_dims(shifts, axis=1)
-
-            # This produces the desired shift (in fact a rollover).
-            def roll_sequence(seq):
-                return ops.take_along_axis(seq, ix, axis=1)
-
-            # The shifting rolls the content over so the prompt is at the end of
-            # the sequence and the generated text is at the beginning. We mask
-            # it to retain the generated text only.
-            y["padding_mask"] = ops.logical_xor(
-                roll_sequence(prompt_mask), roll_sequence(x["padding_mask"])
-            )
-            # we assume the mask is enough and there is no need to zero-out the
-            # values
-            y["token_ids"] = roll_sequence(x["token_ids"])
-
-            return y
-
-        def postprocess(x):
-            return self.preprocessor.generate_postprocess(x)
-
-        # Normalize inputs, apply our three passes, and normalize outputs.
-        inputs, input_is_scalar = self._normalize_generate_inputs(inputs)
-
-        if self.preprocessor is not None:
-            inputs = [preprocess(x) for x in inputs]
-
-        if strip_prompt:
-            outputs = [strip_prompt_function(generate(x), x) for x in inputs]
-        else:
-            outputs = [generate(x) for x in inputs]
-
-        if self.preprocessor is not None:
-            outputs = [postprocess(x) for x in outputs]
-
-        return self._normalize_generate_outputs(outputs, input_is_scalar)

@@ -57,9 +57,25 @@ class MockPreprocessor(Preprocessor):
 
 
 class MockCausalLM(CausalLM):
-    def __init__(self, *args, mock_output_text=None, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, backbone=None, preprocessor=None, mock_output_text=None, tools=None, *args, **kwargs):
+        # First, set up the attributes that Task expects to be present,
+        # like self.backbone and self.preprocessor.
+        if backbone is None:
+            # Provide a minimal backbone mock.
+            backbone = keras.Sequential([keras.Input(shape=(1,)), keras.layers.Dense(10)], name="mock_backbone")
+
+        # These need to be set *before* CausalLM's (and therefore Task's) __init__ is called.
+        self.backbone = backbone
+        self.preprocessor = preprocessor
         self.mock_output_text = mock_output_text
+
+        # Now call super().__init__ for CausalLM.
+        # CausalLM.__init__ takes `tools` and `**kwargs` (which go to Task, then Model, then Layer).
+        # We must ensure `backbone` and `preprocessor` are not in `kwargs` passed to CausalLM's super call
+        # as they are not standard Layer/Model kwargs.
+        # The `tools` kwarg is handled by CausalLM's __init__.
+        super().__init__(*args, tools=tools, **kwargs) # `compile` is a kwarg for Task, will be in kwargs if passed.
+
 
     def generate_step(self, inputs, stop_token_ids=None):
         # Return a structure that generate_postprocess in CausalLM can handle
@@ -195,8 +211,31 @@ def test_tool_prompt_injection():
     model.generate(original_prompt)
 
     assert capture_preprocessor_input.called_with is not None
-    processed_prompt = capture_preprocessor_input.called_with
+    # generate_preprocess is called with a list of strings if the input is a list of strings
+    # or a single string if input is a single string.
+    # _normalize_generate_inputs wraps single string in a list, so preprocess in generate() gets a list.
+    # And the preprocess in CausalLM.generate() also iterates:
+    # `inputs = [preprocess(x) for x in inputs]`
+    # `x` here is `tool_prompt + "\n\nUser query: " + i` which is a string.
+    # So capture_preprocessor_input.called_with should be the string itself.
+    # Let's re-check the CausalLM.generate() flow for preprocess.
+    # inputs_iterable, input_is_scalar = self._normalize_generate_inputs(inputs) -> inputs_iterable is list of batches
+    #   if self.preprocessor is not None:
+    #       for x_batch in inputs_iterable:  <- x_batch is the actual input to preprocess() defined in generate()
+    #           processed_inputs.append(preprocess(x_batch))
+    # The preprocess() defined in generate() is:
+    #   def preprocess(x):
+    #       if self.tools: x = tool_prompt + ... + x # x is string here
+    #       return self.preprocessor.generate_preprocess(x, sequence_length=max_length)
+    # So, self.preprocessor.generate_preprocess (which is capture_preprocessor_input) is called with the modified string
+    # that has been wrapped in a list by CausalLM.generate's preprocessing logic.
 
-    assert "You have access to the following tools:" in processed_prompt
-    assert "- my_tool: Does something cool." in processed_prompt
-    assert "User query: Hello world" in processed_prompt
+    processed_prompt_list = capture_preprocessor_input.called_with
+    assert isinstance(processed_prompt_list, list), f"Expected list, got {type(processed_prompt_list)}"
+    assert len(processed_prompt_list) == 1, f"Expected list of length 1, got {len(processed_prompt_list)}"
+    processed_prompt_str = processed_prompt_list[0]
+    assert isinstance(processed_prompt_str, str), f"Expected string element, got {type(processed_prompt_str)}"
+
+    assert "You have access to the following tools:" in processed_prompt_str
+    assert "- my_tool: Does something cool." in processed_prompt_str
+    assert "User query: Hello world" in processed_prompt_str
