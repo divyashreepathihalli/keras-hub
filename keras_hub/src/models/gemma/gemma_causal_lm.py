@@ -138,6 +138,7 @@ class GemmaCausalLM(CausalLM):
         self,
         backbone,
         preprocessor=None,
+        tools=None,
         **kwargs,
     ):
         # === Layers ===
@@ -151,6 +152,7 @@ class GemmaCausalLM(CausalLM):
         super().__init__(
             inputs=inputs,
             outputs=outputs,
+            tools=tools,
             **kwargs,
         )
 
