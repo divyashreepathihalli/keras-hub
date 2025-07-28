@@ -125,14 +125,32 @@ class Distiller(keras.Model):
         self._compile_optimizer = optimizer
         self._compile_metrics = metrics or []
 
-        # Call parent compile with minimal configuration (no metrics to avoid
-        # TrackedList issues)
+        # Call parent compile with minimal configuration to avoid TrackedList
+        # issues
+        # We handle loss and metrics manually in train_step/test_step
         super().compile(
             optimizer=optimizer,
             loss=None,  # We handle loss manually in train_step
             metrics=None,  # We handle metrics manually to avoid TrackedList
             # issues
+            **kwargs,
         )
+
+    def reset_metrics(self):
+        """Reset metrics to avoid TrackedList issues."""
+        # Reset our custom loss trackers
+        self.student_loss_tracker.reset_state()
+        self.distillation_loss_tracker.reset_state()
+        self.total_loss_tracker.reset_state()
+
+    @property
+    def metrics(self):
+        """Return our custom metrics to avoid TrackedList issues."""
+        return [
+            self.student_loss_tracker,
+            self.distillation_loss_tracker,
+            self.total_loss_tracker,
+        ]
 
     def train_step(self, data):
         """Custom training step for knowledge distillation."""
@@ -172,7 +190,7 @@ class Distiller(keras.Model):
         self.distillation_loss_tracker.update_state(distillation_loss)
         self.total_loss_tracker.update_state(total_loss)
 
-        # Return metrics
+        # Return metrics as simple dict (no TrackedList issues)
         return {
             "student_loss": self.student_loss_tracker.result(),
             "distillation_loss": self.distillation_loss_tracker.result(),
@@ -214,7 +232,7 @@ class Distiller(keras.Model):
         self.distillation_loss_tracker.update_state(distillation_loss)
         self.total_loss_tracker.update_state(total_loss)
 
-        # Return metrics
+        # Return metrics as simple dict (no TrackedList issues)
         return {
             "student_loss": self.student_loss_tracker.result(),
             "distillation_loss": self.distillation_loss_tracker.result(),

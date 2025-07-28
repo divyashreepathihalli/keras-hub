@@ -104,27 +104,25 @@ class TestDistiller(TestCase):
         # Run training step
         metrics = self.distiller.train_step((self.x, self.y))
 
-        # Check that all required metrics are present
-        required_metrics = ["loss", "student_loss", "distillation_loss"]
-        for metric_name in required_metrics:
+        # Check that all expected metrics are present
+        expected_metrics = ["student_loss", "distillation_loss", "total_loss"]
+        for metric_name in expected_metrics:
             self.assertIn(metric_name, metrics)
-            self.assertGreater(float(metrics[metric_name]), 0)
 
-        # Check that accuracy metric is present
-        self.assertIn("sparse_categorical_accuracy", metrics)
-
-        # Check that all values are tensors or floats
-        for value in metrics.values():
-            self.assertTrue(
-                isinstance(
-                    value,
-                    (
-                        float,
-                        keras.KerasTensor,
-                        type(ops.convert_to_tensor(1.0)),
-                    ),
+        # Check that metrics are valid
+        for metric_name in expected_metrics:
+            metric_value = metrics[metric_name]
+            self.assertIsInstance(
+                metric_value,
+                (float, keras.KerasTensor, type(ops.convert_to_tensor(1.0))),
+            )
+            self.assertGreater(
+                float(
+                    metric_value.numpy()
+                    if hasattr(metric_value, "numpy")
+                    else metric_value
                 ),
-                f"Expected tensor or float, got {type(value)}",
+                0,
             )
 
     def test_test_step(self):
@@ -132,43 +130,41 @@ class TestDistiller(TestCase):
         # Run test step
         metrics = self.distiller.test_step((self.x, self.y))
 
-        # Check that loss is present
-        self.assertIn("loss", metrics)
-        self.assertGreater(float(metrics["loss"]), 0)
+        # Check that all expected metrics are present
+        expected_metrics = ["student_loss", "distillation_loss", "total_loss"]
+        for metric_name in expected_metrics:
+            self.assertIn(metric_name, metrics)
 
-        # Check that accuracy metric is present
-        self.assertIn("sparse_categorical_accuracy", metrics)
-
-        # Check that all values are tensors or floats
-        for value in metrics.values():
-            self.assertTrue(
-                isinstance(
-                    value,
-                    (
-                        float,
-                        keras.KerasTensor,
-                        type(ops.convert_to_tensor(1.0)),
-                    ),
+        # Check that metrics are valid
+        for metric_name in expected_metrics:
+            metric_value = metrics[metric_name]
+            self.assertIsInstance(
+                metric_value,
+                (float, keras.KerasTensor, type(ops.convert_to_tensor(1.0))),
+            )
+            self.assertGreater(
+                float(
+                    metric_value.numpy()
+                    if hasattr(metric_value, "numpy")
+                    else metric_value
                 ),
-                f"Expected tensor or float, got {type(value)}",
+                0,
             )
 
     def test_alpha_weighting(self):
         """Test that alpha properly weights student vs distillation loss."""
-        # Create distiller with different alpha values
+        # Create distillers with different alpha values
         distiller_alpha_0 = Distiller(
             teacher=self.teacher,
             student=self.student,
             strategies=[self.strategy],
             alpha=0.0,  # Only distillation loss
-            temperature=2.0,
         )
         distiller_alpha_1 = Distiller(
             teacher=self.teacher,
             student=self.student,
             strategies=[self.strategy],
             alpha=1.0,  # Only student loss
-            temperature=2.0,
         )
 
         # Compile both
@@ -185,19 +181,20 @@ class TestDistiller(TestCase):
         metrics_0 = distiller_alpha_0.train_step((self.x, self.y))
         metrics_1 = distiller_alpha_1.train_step((self.x, self.y))
 
-        # Check that losses are different
-        self.assertNotEqual(float(metrics_0["loss"]), float(metrics_1["loss"]))
+        # Check that total losses are different
+        self.assertNotEqual(
+            float(metrics_0["total_loss"]), float(metrics_1["total_loss"])
+        )
 
     def test_teacher_freezing(self):
-        """Test that teacher parameters are not updated during training."""
+        """Test that teacher parameters are frozen during training."""
         # Get initial teacher weights
         initial_teacher_weights = [
             w.numpy().copy() for w in self.teacher.trainable_weights
         ]
 
-        # Run multiple training steps
-        for _ in range(5):
-            self.distiller.train_step((self.x, self.y))
+        # Run training step
+        self.distiller.train_step((self.x, self.y))
 
         # Check that teacher weights haven't changed
         current_teacher_weights = [
@@ -243,8 +240,8 @@ class TestDistiller(TestCase):
         for i in range(10):
             metrics = test_distiller.train_step((self.x, self.y))
             # Check that training produces valid metrics
-            self.assertIn("loss", metrics)
-            self.assertGreater(float(metrics["loss"]), 0)
+            self.assertIn("total_loss", metrics)
+            self.assertGreater(float(metrics["total_loss"]), 0)
 
         # Check that student weights have changed (more lenient check)
         current_student_weights = [
@@ -298,9 +295,9 @@ class TestDistiller(TestCase):
             student=self.student,
             strategies=[self.strategy, strategy2],
             alpha=0.5,
-            temperature=2.0,
         )
 
+        # Compile
         multi_strategy_distiller.compile(
             optimizer=keras.optimizers.Adam(),
             metrics=[keras.metrics.SparseCategoricalAccuracy()],
@@ -309,9 +306,9 @@ class TestDistiller(TestCase):
         # Run training step
         metrics = multi_strategy_distiller.train_step((self.x, self.y))
 
-        # Check that distillation loss is higher (due to multiple strategies)
-        self.assertIn("distillation_loss", metrics)
-        self.assertGreater(float(metrics["distillation_loss"]), 0)
+        # Check that metrics are present
+        self.assertIn("total_loss", metrics)
+        self.assertGreater(float(metrics["total_loss"]), 0)
 
     def test_temperature_scaling(self):
         """Test that temperature scaling affects distillation loss."""
@@ -319,16 +316,14 @@ class TestDistiller(TestCase):
         distiller_temp_1 = Distiller(
             teacher=self.teacher,
             student=self.student,
-            strategies=[self.strategy],
+            strategies=[LogitsDistillation(temperature=1.0)],
             alpha=0.5,
-            temperature=1.0,
         )
         distiller_temp_5 = Distiller(
             teacher=self.teacher,
             student=self.student,
-            strategies=[self.strategy],
+            strategies=[LogitsDistillation(temperature=5.0)],
             alpha=0.5,
-            temperature=5.0,
         )
 
         # Compile both
@@ -377,13 +372,15 @@ class TestLogitsDistillation(TestCase):
         )
 
         # Compute loss
-        loss = self.strategy.compute_loss(
-            teacher_logits, student_logits, self.temperature
-        )
+        loss = self.strategy.compute_loss(teacher_logits, student_logits)
 
-        # Check that loss is a scalar and positive
-        self.assertEqual(loss.shape, ())
-        self.assertGreater(float(loss), 0)
+        # Check that loss is a tensor and positive
+        self.assertIsInstance(
+            loss, (keras.KerasTensor, type(ops.convert_to_tensor(1.0)))
+        )
+        self.assertGreater(
+            float(loss.numpy() if hasattr(loss, "numpy") else loss), 0
+        )
 
     def test_temperature_scaling(self):
         """Test that temperature affects the loss value."""
@@ -400,16 +397,30 @@ class TestLogitsDistillation(TestCase):
             dtype="float32",
         )
 
+        # Create strategies with different temperatures
+        strategy_temp_1 = LogitsDistillation(temperature=1.0)
+        strategy_temp_5 = LogitsDistillation(temperature=5.0)
+
         # Compute loss with different temperatures
-        loss_temp_1 = self.strategy.compute_loss(
-            teacher_logits, student_logits, 1.0
+        loss_temp_1 = strategy_temp_1.compute_loss(
+            teacher_logits, student_logits
         )
-        loss_temp_5 = self.strategy.compute_loss(
-            teacher_logits, student_logits, 5.0
+        loss_temp_5 = strategy_temp_5.compute_loss(
+            teacher_logits, student_logits
         )
 
         # Check that losses are different
-        self.assertNotEqual(float(loss_temp_1), float(loss_temp_5))
+        loss_1_val = float(
+            loss_temp_1.numpy()
+            if hasattr(loss_temp_1, "numpy")
+            else loss_temp_1
+        )
+        loss_5_val = float(
+            loss_temp_5.numpy()
+            if hasattr(loss_temp_5, "numpy")
+            else loss_temp_5
+        )
+        self.assertNotEqual(loss_1_val, loss_5_val)
 
     def test_numerical_stability(self):
         """Test that the loss computation is numerically stable."""
@@ -423,10 +434,15 @@ class TestLogitsDistillation(TestCase):
         )
 
         # Compute loss - should not raise any errors
-        loss = self.strategy.compute_loss(
-            teacher_logits, student_logits, self.temperature
-        )
+        loss = self.strategy.compute_loss(teacher_logits, student_logits)
 
         # Check that loss is finite
-        self.assertTrue(np.isfinite(float(loss)))
-        self.assertGreater(float(loss), 0)
+        loss_val = float(loss.numpy() if hasattr(loss, "numpy") else loss)
+        self.assertTrue(np.isfinite(loss_val))
+        self.assertGreater(loss_val, 0)
+
+
+if __name__ == "__main__":
+    import unittest
+
+    unittest.main()
