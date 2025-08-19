@@ -63,7 +63,7 @@ keras_hub/src/utils/transformers/
 
 ### Model Inputs
 Use standardized names for model input arguments to ensure interoperability:
-- **Text Models**: `token_ids`, `padding_mask`
+- **Text Models**: `token_ids`, `padding_mask`, `segment_ids`
 - **Image Models**: `pixel_values`
 - **Audio Models**: `audio_features`
 
@@ -75,7 +75,7 @@ Use standardized names for model input arguments to ensure interoperability:
 
 **Implementation**: Use the Keras Functional API to define the model graph inside the class `__init__` method.
 
-**API**: Do not implement `from_preset()` in the initial PR for the backbone. This is added later with the presets.
+**API**: The `from_preset()` method is inherited from the base model and will load architecture and weights from the `presets` dictionary in `<model_name>_presets.py`.
 
 **Reusability**: Prefer using layers from `keras.layers` and `keras_hub.layers`. Custom layers should only be implemented for significant architectural deviations not covered by existing Keras components.
 
@@ -209,8 +209,8 @@ class MyModelTokenizer(WordPieceTokenizer):
 
 **Example Preprocessor**:
 ```python
-@keras_hub_export("keras_hub.models.MyModelPreprocessor")
-class MyModelPreprocessor(TextClassifierPreprocessor):
+@keras_hub_export("keras_hub.models.MyModelTextClassifierPreprocessor")
+class MyModelTextClassifierPreprocessor(TextClassifierPreprocessor):
     """MyModel preprocessing for text classification.
     
     This preprocessing layer will prepare inputs for text classification.
@@ -221,7 +221,7 @@ class MyModelPreprocessor(TextClassifierPreprocessor):
         
     Examples:
     ```python
-    preprocessor = keras_hub.models.MyModelPreprocessor.from_preset("my_model_base")
+    preprocessor = keras_hub.models.MyModelTextClassifierPreprocessor.from_preset("my_model_base")
     preprocessor("The quick brown fox jumped.")
     ```
     """
@@ -287,7 +287,7 @@ class MyModelTextClassifier(TextClassifier):
 
 **Purpose**: This file defines a dictionary of preset configurations for the model.
 
-**Content**: Each entry includes the configuration arguments for the model (`config`), a description, and the URL to the pre-trained weights hosted on Kaggle (`weights_url`).
+**Content**: Each entry includes the configuration arguments for the model (`config`), a description, and the handle to the pre-trained weights hosted on Kaggle (`kaggle_handle`).
 
 **Example Presets**:
 ```python
@@ -320,6 +320,7 @@ backbone_presets = {
 - The first line should be a concise summary.
 - Include comprehensive examples showing usage patterns.
 - Document all parameters, return values, and exceptions.
+- For `keras.layers.Layer` subclasses, include a `Call arguments` section to document the arguments of the `call` method.
 
 ### Type Hints
 - KerasHub does not use type hints in function signatures or `__init__` methods.
@@ -433,8 +434,11 @@ class MyModelBackboneTest(TestCase):
             cls=MyModelBackbone,
             preset="my_model_base",
             input_data=self.input_data,
-            expected_output_shape=(2, 5, 16),
-            expected_partial_output=ops.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+            expected_output_shape={"sequence_output": (2, 5, 16), "pooled_output": (2, 16)},
+            expected_partial_output={
+                "sequence_output": ops.array([1.0, 2.0, 3.0, 4.0, 5.0]),
+                "pooled_output": ops.array([-0.5, 0.5, -0.5, 0.5, -0.5]),
+            },
         )
 
     @pytest.mark.extra_large
@@ -468,13 +472,20 @@ Prefer importing `keras` as a top-level object:
 ```python
 import keras
 from keras import ops
-from keras import layers
 ```
+
+You can import sub-modules like `layers` and `models` directly.
+```python
+from keras import layers
+from keras import models
+```
+
+When using a layer from `keras.layers`, you can either use the full path `keras.layers.Dense` or import the specific layer `from keras.layers import Dense`.
 
 ❌ `tf.keras.activations.X`  
 ✅ `keras.activations.X`
 
-❌ `layers.X`  
+❌ `layers.X` (if you only did `import keras`)
 ✅ `keras.layers.X` or `keras_hub.layers.X`
 
 ### KerasHub Imports
@@ -601,6 +612,7 @@ Each HuggingFace converter should include:
 1. **Configuration conversion**: `convert_backbone_config()` function that maps HuggingFace config to KerasHub config
 2. **Weight conversion**: `convert_weights()` function that maps HuggingFace weights to KerasHub weights
 3. **Backbone class reference**: `backbone_cls` variable pointing to the KerasHub backbone class
+4. **Tokenizer conversion** (if applicable): `convert_tokenizer()` function that loads the tokenizer vocabulary and configuration from the HuggingFace model.
 
 ### Example HuggingFace Converter
 ```python
@@ -669,7 +681,7 @@ from keras_hub.src.models.text_classifier import TextClassifier
 from keras_hub.src.tests.test_case import TestCase
 
 
-class TestMyModelConverter(TestCase):
+class TestTask(TestCase):
     @pytest.mark.large
     def test_convert_preset(self):
         model = MyModelTextClassifier.from_preset(
