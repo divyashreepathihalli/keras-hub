@@ -404,6 +404,38 @@ class CausalLM(Task):
 
         return self._normalize_generate_outputs(outputs, input_is_scalar)
 
+    def to_vllm(self):
+        """Wrap this model for serving with vLLM's JAX/TPU model runner.
+
+        Returns a ``KerasHubVLLMModel`` that adapts this model's
+        ``call_with_cache`` interface to the forward-pass signature
+        expected by vLLM.  The resulting object can be used with vLLM's
+        JAX model runner for high-throughput serving on TPU or GPU.
+
+        Requires the JAX backend.
+
+        Returns:
+            A ``KerasHubVLLMModel`` instance wrapping this model.
+
+        Example:
+        ```python
+        import os
+        os.environ["KERAS_BACKEND"] = "jax"
+
+        import keras_hub
+
+        model = keras_hub.models.LlamaCausalLM.from_preset(
+            "llama3_8b_en", dtype="bfloat16",
+        )
+        vllm_model = model.to_vllm()
+        ```
+        """
+        from keras_hub.src.utils.vllm.keras_hub_vllm_model import (
+            KerasHubVLLMModel,
+        )
+
+        return KerasHubVLLMModel(self)
+
     def export_to_transformers(self, path):
         """Export the full CausalLM model to HuggingFace Transformers format.
 

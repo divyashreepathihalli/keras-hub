@@ -41,6 +41,9 @@ dependencies = [
 Home = "https://keras.io/keras_hub/"
 Repository = "https://github.com/keras-team/keras/keras_hub"
 
+[project.entry-points."vllm.general_plugins"]
+keras_hub = "keras_hub.src.utils.vllm.plugin:register"
+
 [tool.setuptools.dynamic]
 version = {attr = "keras_hub.src.version.__version__"}
 
