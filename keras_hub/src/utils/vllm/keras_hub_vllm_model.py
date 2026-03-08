@@ -318,7 +318,7 @@ class KerasHubVLLMModel:
 
         import jax
 
-        @partial(jax.jit)
+        @partial(jax.jit, static_argnames=["attention_metadata"])
         def jit_forward(kv_caches, input_ids, attention_metadata, state):
             trainable_variables, non_trainable_variables = state
             mapping = itertools.chain(
