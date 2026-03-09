@@ -8,11 +8,7 @@ registry.
 
 After registration, users can serve a KerasHub model with::
 
-    vllm serve keras-hub:<preset_name>
-
-For example::
-
-    vllm serve keras-hub:llama3_8b_en
+    vllm serve keras_hub:gemma_2b_en
 """
 
 
@@ -20,14 +16,13 @@ def register():
     """Register KerasHub models with vLLM's model registry.
 
     This function is called automatically by vLLM's plugin system
-    during startup.  It registers a ``KerasHubModel`` model class
-    that wraps any KerasHub ``CausalLM`` for serving.
+    during startup.  It is re-entrant (safe to call multiple times).
     """
     try:
         from vllm import ModelRegistry
 
         ModelRegistry.register_model(
-            "KerasHubModel",
+            "KerasHubVLLMModel",
             "keras_hub.src.utils.vllm.keras_hub_vllm_model:"
             "KerasHubVLLMModel",
         )

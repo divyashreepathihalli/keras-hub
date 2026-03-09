@@ -408,11 +408,10 @@ class CausalLM(Task):
         """Wrap this model for serving with vLLM's JAX/TPU model runner.
 
         Returns a ``KerasHubVLLMModel`` that adapts this model's
-        ``call_with_cache`` interface to the forward-pass signature
-        expected by vLLM.  The resulting object can be used with vLLM's
-        JAX model runner for high-throughput serving on TPU or GPU.
+        ``call_with_cache`` interface to the exact forward-pass
+        signature that vLLM's JAX model runner calls during inference.
 
-        Requires the JAX backend.
+        Requires ``KERAS_BACKEND=jax`` and ``KERAS_NNX_ENABLED=true``.
 
         Returns:
             A ``KerasHubVLLMModel`` instance wrapping this model.
@@ -421,13 +420,15 @@ class CausalLM(Task):
         ```python
         import os
         os.environ["KERAS_BACKEND"] = "jax"
+        os.environ["KERAS_NNX_ENABLED"] = "true"
 
         import keras_hub
 
-        model = keras_hub.models.LlamaCausalLM.from_preset(
-            "llama3_8b_en", dtype="bfloat16",
+        model = keras_hub.models.GemmaCausalLM.from_preset(
+            "gemma_2b_en", dtype="bfloat16",
         )
         vllm_model = model.to_vllm()
+        # vllm_model now exposes __call__ and compute_logits for vLLM.
         ```
         """
         from keras_hub.src.utils.vllm.keras_hub_vllm_model import (

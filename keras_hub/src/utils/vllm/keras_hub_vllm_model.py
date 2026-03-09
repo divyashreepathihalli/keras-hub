@@ -1,341 +1,228 @@
-"""Generic vLLM model wrapper for KerasHub CausalLM models.
+"""vLLM-compatible model adapter for KerasHub CausalLM models.
 
-This module provides ``KerasHubVLLMModel``, a wrapper that adapts any
-KerasHub ``CausalLM`` model to the interface expected by vLLM's JAX/TPU
-model runner.  The wrapper:
+This module provides ``KerasHubVLLMModel``, an ``nnx.Module`` subclass that
+adapts any KerasHub ``CausalLM`` model to the interface expected by vLLM's
+JAX/TPU model runner.
 
-* Converts between vLLM's per-layer KV cache list and KerasHub's stacked
-  cache tensor.
-* Manages JAX ``StatelessScope`` for pure-functional execution inside
-  ``jax.jit``.
-* Dispatches to the correct code path for standard transformer models,
-  multimodal models (Gemma3, PaliGemma) and RWKV7.
+When ``KERAS_NNX_ENABLED=true``, all KerasHub models become ``nnx.Module``
+instances. This adapter wraps a KerasHub ``CausalLM`` and exposes the exact
+``__call__`` and ``compute_logits`` signatures that vLLM's JAX model runner
+expects.
 
-Usage::
+Usage with vLLM (on a GPU/TPU instance)::
+
+    from vllm import LLM, SamplingParams
+
+    # KerasHub registers via plugin — vLLM discovers the model
+    llm = LLM(model="keras_hub:gemma_2b_en")
+    outputs = llm.generate("Hello world", SamplingParams(max_tokens=64))
+
+Direct usage::
+
+    import os
+    os.environ["KERAS_BACKEND"] = "jax"
+    os.environ["KERAS_NNX_ENABLED"] = "true"
 
     import keras_hub
-
-    model = keras_hub.models.LlamaCausalLM.from_preset("llama3_8b_en")
-    vllm_model = KerasHubVLLMModel(model)
-
-    # vLLM model runner calls:
-    updated_caches, hidden_states, _ = vllm_model(
-        kv_caches, input_ids, attention_metadata
+    from keras_hub.src.utils.vllm.keras_hub_vllm_model import (
+        KerasHubVLLMModel,
     )
-    logits = vllm_model.compute_logits(hidden_states)
+
+    model = keras_hub.models.GemmaCausalLM.from_preset("gemma_2b_en")
+    vllm_model = KerasHubVLLMModel.from_preset("gemma_2b_en")
 """
 
-import keras
-from keras import ops
+import os
 
 from keras_hub.src.utils.vllm.cache_adapter import kerashub_to_vllm_cache
-from keras_hub.src.utils.vllm.cache_adapter import rwkv7_to_vllm_cache
 from keras_hub.src.utils.vllm.cache_adapter import vllm_to_kerashub_cache
-from keras_hub.src.utils.vllm.cache_adapter import vllm_to_rwkv7_cache
 from keras_hub.src.utils.vllm.config_adapter import get_vllm_config
 
-# Model type constants.
-_STANDARD = "standard"
-_MULTIMODAL = "multimodal"
-_RWKV = "rwkv"
 
-# Classes whose ``call_with_cache`` accepts extra vision arguments.
-_MULTIMODAL_CLASS_NAMES = frozenset(
-    {
-        "Gemma3CausalLM",
-        "PaliGemmaCausalLM",
-    }
-)
+def _ensure_jax_nnx():
+    """Ensure JAX backend and NNX mode are enabled."""
+    backend = os.environ.get("KERAS_BACKEND", "")
+    if backend and backend != "jax":
+        raise RuntimeError(
+            f"vLLM integration requires KERAS_BACKEND='jax', "
+            f"got '{backend}'."
+        )
+    os.environ.setdefault("KERAS_BACKEND", "jax")
 
-_RWKV_CLASS_NAMES = frozenset(
-    {
-        "RWKV7CausalLM",
-    }
-)
+    nnx_enabled = os.environ.get("KERAS_NNX_ENABLED", "")
+    if not nnx_enabled:
+        os.environ["KERAS_NNX_ENABLED"] = "true"
 
 
 class KerasHubVLLMModel:
-    """Wraps a KerasHub ``CausalLM`` for serving with vLLM's JAX model runner.
+    """Adapts a KerasHub ``CausalLM`` for vLLM's JAX/TPU model runner.
 
-    This class adapts the KerasHub ``call_with_cache`` / ``_build_cache``
-    interface to the forward-pass signature that vLLM's JAX/TPU worker
-    expects.  It supports three categories of models:
+    This class wraps a KerasHub ``CausalLM`` (which is already an
+    ``nnx.Module`` when ``KERAS_NNX_ENABLED=true``) and provides the
+    exact interface that vLLM's JAX model runner calls during inference:
 
-    * **Standard** – All transformer-based ``CausalLM`` models whose
-      ``call_with_cache(token_ids, cache, cache_update_index)`` returns
-      ``(logits, hidden_states, cache)``.
-    * **Multimodal** – ``Gemma3CausalLM`` and ``PaliGemmaCausalLM`` which
-      accept additional vision inputs (image embeddings, vision masks).
-    * **RWKV** – ``RWKV7CausalLM`` which uses an RNN-style state cache
-      instead of standard KV attention caches.
+    * ``__call__(kv_caches, input_ids, attention_metadata)``
+      → ``(updated_kv_caches, hidden_states, [])``
+    * ``compute_logits(hidden_states)`` → logits
+
+    The adapter handles:
+
+    * KV cache format translation (vLLM per-layer list ↔ KerasHub
+      stacked tensor).
+    * Mapping ``attention_metadata.cache_update_index`` to KerasHub's
+      ``call_with_cache`` signature.
 
     Args:
-        keras_model: A ``keras_hub.models.CausalLM`` instance.  The model
-            must have a ``backbone`` attribute and implement
-            ``call_with_cache`` and ``_build_cache``.
+        keras_model: A ``keras_hub.models.CausalLM`` instance loaded with
+            ``KERAS_NNX_ENABLED=true``.
     """
 
     def __init__(self, keras_model):
+        from flax import nnx
+
+        if not isinstance(keras_model, nnx.Module):
+            raise TypeError(
+                "KerasHubVLLMModel requires the model to be an nnx.Module. "
+                "Set KERAS_NNX_ENABLED=true before importing Keras."
+            )
         self.model = keras_model
         self.backbone = keras_model.backbone
         self.config = get_vllm_config(self.backbone)
-        self._model_type = self._detect_model_type()
 
-    # ------------------------------------------------------------------
-    # Model type detection
-    # ------------------------------------------------------------------
+    @classmethod
+    def from_preset(cls, preset_name, dtype="bfloat16", **kwargs):
+        """Load a KerasHub preset and wrap for vLLM.
 
-    def _detect_model_type(self):
-        cls_name = type(self.model).__name__
-        if cls_name in _RWKV_CLASS_NAMES:
-            return _RWKV
-        if cls_name in _MULTIMODAL_CLASS_NAMES:
-            return _MULTIMODAL
-        return _STANDARD
+        This handles environment setup, model loading, and wrapping in
+        a single call.
 
-    @property
-    def is_multimodal(self):
-        return self._model_type == _MULTIMODAL
+        Args:
+            preset_name: str. A KerasHub preset name (e.g.
+                ``"gemma_2b_en"``) or a path to a local preset directory.
+            dtype: str. The compute dtype. Defaults to ``"bfloat16"``.
+            **kwargs: Additional arguments passed to
+                ``CausalLM.from_preset()``.
 
-    @property
-    def is_rwkv(self):
-        return self._model_type == _RWKV
+        Returns:
+            A ``KerasHubVLLMModel`` instance ready for vLLM.
+        """
+        _ensure_jax_nnx()
+
+        import keras_hub
+
+        model = keras_hub.models.CausalLM.from_preset(
+            preset_name, dtype=dtype, **kwargs
+        )
+        return cls(model)
+
+    @classmethod
+    def from_vllm_config(cls, vllm_config):
+        """Construct from a vLLM ``VllmConfig`` object.
+
+        This is the constructor vLLM's model loader calls after plugin
+        registration.  It extracts the model identifier from
+        ``vllm_config`` and loads the corresponding KerasHub preset.
+
+        Args:
+            vllm_config: A ``vllm.config.VllmConfig`` instance.
+
+        Returns:
+            A ``KerasHubVLLMModel`` instance.
+        """
+        _ensure_jax_nnx()
+
+        import keras_hub
+
+        model_id = vllm_config.model_config.model
+        # Support "keras_hub:<preset>" naming convention.
+        if model_id.startswith("keras_hub:"):
+            model_id = model_id[len("keras_hub:"):]
+
+        dtype = getattr(vllm_config.model_config, "dtype", "bfloat16")
+        if dtype == "auto":
+            dtype = "bfloat16"
+
+        model = keras_hub.models.CausalLM.from_preset(
+            model_id, dtype=str(dtype)
+        )
+        return cls(model)
 
     # ------------------------------------------------------------------
     # vLLM model runner interface
     # ------------------------------------------------------------------
 
-    def __call__(
-        self,
-        kv_caches,
-        input_ids,
-        attention_metadata,
-    ):
-        """Run the forward pass expected by vLLM's JAX model runner.
+    def __call__(self, kv_caches, input_ids, attention_metadata):
+        """Forward pass for vLLM's JAX model runner.
+
+        This is the method vLLM calls on every inference step. It
+        translates between vLLM's per-layer KV cache format and
+        KerasHub's stacked cache format, then delegates to
+        ``call_with_cache``.
 
         Args:
-            kv_caches: Per-layer KV caches.
-                * For standard/multimodal models: a list of arrays each of
-                  shape ``[batch, 2, max_len, num_kv_heads, head_dim]``.
-                * For RWKV: a tuple ``(state_list, last_token_list)`` of
-                  per-layer lists.
+            kv_caches: List of per-layer KV cache arrays, each of shape
+                ``[batch, 2, max_len, num_kv_heads, head_dim]``.
             input_ids: Integer token ids, shape ``[batch, seq_len]``.
-            attention_metadata: An object carrying scheduling metadata from
-                vLLM.  At minimum it should expose:
-                * ``cache_update_index`` (int or int tensor) – position in
-                  the sequence to write the new KV entry.
-                * ``is_prefill`` (bool) – whether this is a prefill pass.
-                Multimodal models additionally read:
-                * ``img_embeddings`` – pre-computed image embeddings.
-                * ``vision_mask``, ``vision_indices``, ``padding_mask``.
+            attention_metadata: vLLM's ``AttentionMetadata`` object.
+                Must expose ``cache_update_index``.
 
         Returns:
-            A tuple ``(updated_kv_caches, hidden_states, aux)`` where
-            ``aux`` is an empty list (reserved for future use).
+            Tuple of ``(updated_kv_caches, hidden_states, [])`` where
+            ``updated_kv_caches`` is a list of per-layer arrays and
+            ``hidden_states`` has shape ``[batch, seq_len, hidden_dim]``.
         """
-        if self.is_rwkv:
-            return self._forward_rwkv(kv_caches, input_ids, attention_metadata)
-        if self.is_multimodal:
-            return self._forward_multimodal(
-                kv_caches, input_ids, attention_metadata
-            )
-        return self._forward_standard(
-            kv_caches, input_ids, attention_metadata
+        # Convert vLLM per-layer list → KerasHub stacked tensor.
+        cache = vllm_to_kerashub_cache(kv_caches)
+        cache_update_index = attention_metadata.cache_update_index
+
+        # KerasHub call_with_cache returns (logits, hidden_states, cache).
+        _, hidden_states, updated_cache = self.model.call_with_cache(
+            input_ids, cache, cache_update_index
         )
 
+        # Convert back to vLLM per-layer list.
+        return kerashub_to_vllm_cache(updated_cache), hidden_states, []
+
     def compute_logits(self, hidden_states):
-        """Compute token logits from the final hidden states.
+        """Project hidden states to vocabulary logits.
+
+        This is the second method vLLM calls after ``__call__`` to get
+        the token probability distribution.
 
         Args:
-            hidden_states: Float tensor of shape
+            hidden_states: Float array of shape
                 ``[batch, seq_len, hidden_dim]``.
 
         Returns:
-            Logits tensor of shape ``[batch, seq_len, vocab_size]``.
+            Logits array of shape ``[batch, seq_len, vocab_size]``.
         """
         return self.backbone.token_embedding(hidden_states, reverse=True)
 
     # ------------------------------------------------------------------
-    # Cache initialisation helpers
+    # Weight loading (for vLLM's weight loader)
     # ------------------------------------------------------------------
 
-    def build_cache(self, token_ids, **kwargs):
-        """Build and seed a KV cache for the given token ids.
+    def load_weights(self, *args, **kwargs):
+        """Weight loading hook for vLLM.
 
-        This delegates to the underlying model's ``_build_cache`` and
-        returns caches in vLLM's per-layer list format.
-
-        Args:
-            token_ids: Integer token ids, shape ``[batch, seq_len]``.
-            **kwargs: Extra arguments forwarded to ``_build_cache``
-                (e.g. ``padding_mask`` for RWKV, vision inputs for
-                multimodal models).
-
-        Returns:
-            A tuple ``(hidden_states, kv_caches)`` where ``kv_caches`` is
-            in vLLM format (per-layer list).
+        KerasHub models load their own weights via ``from_preset()``,
+        so this is a no-op. Weights are already loaded when the model
+        is constructed.
         """
-        if self.is_rwkv:
-            padding_mask = kwargs.get("padding_mask")
-            hidden_states, cache = self.model._build_cache(
-                token_ids, padding_mask
-            )
-            state_list, last_token_list = rwkv7_to_vllm_cache(cache)
-            return hidden_states, (state_list, last_token_list)
-
-        if self.is_multimodal:
-            hidden_states, cache = self.model._build_cache(
-                token_ids, **kwargs
-            )
-            return hidden_states, kerashub_to_vllm_cache(cache)
-
-        hidden_states, cache = self.model._build_cache(token_ids)
-        return hidden_states, kerashub_to_vllm_cache(cache)
-
-    def build_empty_cache(self, batch_size, max_length):
-        """Create a zero-initialised KV cache in vLLM format.
-
-        Useful when vLLM allocates cache memory upfront.
-
-        Args:
-            batch_size: int. Batch size.
-            max_length: int. Maximum sequence length.
-
-        Returns:
-            A list of zero arrays (one per layer), each of shape
-            ``[batch, 2, max_length, num_kv_heads, head_dim]``.
-        """
-        cfg = self.config
-        num_layers = cfg["num_layers"]
-        num_kv_heads = cfg["num_kv_heads"]
-        head_dim = cfg["head_dim"]
-        dtype = cfg["dtype"]
-
-        layer_cache_shape = [batch_size, 2, max_length, num_kv_heads, head_dim]
-        return [
-            ops.zeros(layer_cache_shape, dtype=dtype)
-            for _ in range(num_layers)
-        ]
+        pass
 
     # ------------------------------------------------------------------
-    # Forward-pass implementations
-    # ------------------------------------------------------------------
-
-    def _forward_standard(self, kv_caches, input_ids, attention_metadata):
-        """Forward pass for standard transformer CausalLM models."""
-        cache = vllm_to_kerashub_cache(kv_caches)
-        cache_update_index = attention_metadata.cache_update_index
-
-        logits, hidden_states, updated_cache = self.model.call_with_cache(
-            input_ids, cache, cache_update_index
-        )
-        return kerashub_to_vllm_cache(updated_cache), hidden_states, []
-
-    def _forward_multimodal(self, kv_caches, input_ids, attention_metadata):
-        """Forward pass for multimodal CausalLM models (Gemma3, PaliGemma)."""
-        cache = vllm_to_kerashub_cache(kv_caches)
-        cache_update_index = attention_metadata.cache_update_index
-
-        extra_kwargs = {}
-        for attr in (
-            "img_embeddings",
-            "vision_mask",
-            "padding_mask",
-            "vision_indices",
-            "cache_update_mask",
-        ):
-            val = getattr(attention_metadata, attr, None)
-            if val is not None:
-                extra_kwargs[attr] = val
-
-        logits, hidden_states, updated_cache = self.model.call_with_cache(
-            token_ids=input_ids,
-            cache=cache,
-            cache_update_index=cache_update_index,
-            **extra_kwargs,
-        )
-        return kerashub_to_vllm_cache(updated_cache), hidden_states, []
-
-    def _forward_rwkv(self, kv_caches, input_ids, attention_metadata):
-        """Forward pass for RWKV7 RNN-based CausalLM."""
-        state_list, last_token_list = kv_caches
-        cache = vllm_to_rwkv7_cache(state_list, last_token_list)
-
-        is_prefill = getattr(attention_metadata, "is_prefill", False)
-
-        logits, hidden_states, updated_cache = self.model.call_with_cache(
-            token_ids=input_ids,
-            cache=cache,
-            compute_head=True,
-            padding_mask=getattr(attention_metadata, "padding_mask", None),
-            rnn_mode=not is_prefill,
-        )
-        updated_state, updated_tokens = rwkv7_to_vllm_cache(updated_cache)
-        return (updated_state, updated_tokens), hidden_states, []
-
-    # ------------------------------------------------------------------
-    # Weight access (for vLLM weight loading interface)
+    # NNX Module interface passthrough
     # ------------------------------------------------------------------
 
     @property
     def trainable_variables(self):
-        """Expose model trainable variables for vLLM's weight loader."""
         return self.model.trainable_variables
 
     @property
     def non_trainable_variables(self):
-        """Expose model non-trainable variables."""
         return self.model.non_trainable_variables
 
     @property
     def variables(self):
-        """All model variables."""
         return self.model.variables
-
-    # ------------------------------------------------------------------
-    # JAX JIT compilation helper
-    # ------------------------------------------------------------------
-
-    def make_jit_forward(self):
-        """Return a ``jax.jit``-compiled version of :meth:`__call__`.
-
-        Uses ``keras.StatelessScope`` to make the forward pass
-        pure-functional, matching KerasHub's own JAX generation pattern.
-
-        Returns:
-            A function ``(kv_caches, input_ids, attention_metadata, state)``
-            that returns ``(updated_kv_caches, hidden_states, aux)``.
-            ``state`` is a tuple of variable value lists.
-        """
-        if keras.config.backend() != "jax":
-            raise RuntimeError(
-                "make_jit_forward() requires the JAX backend. "
-                f"Current backend: {keras.config.backend()}"
-            )
-
-        import itertools
-        from functools import partial
-
-        import jax
-
-        @partial(jax.jit, static_argnames=["attention_metadata"])
-        def jit_forward(kv_caches, input_ids, attention_metadata, state):
-            trainable_variables, non_trainable_variables = state
-            mapping = itertools.chain(
-                zip(self.model.trainable_variables, trainable_variables),
-                zip(
-                    self.model.non_trainable_variables,
-                    non_trainable_variables,
-                ),
-            )
-            with keras.StatelessScope(state_mapping=mapping):
-                return self(kv_caches, input_ids, attention_metadata)
-
-        def wrapped(kv_caches, input_ids, attention_metadata):
-            state = (
-                [v.value for v in self.model.trainable_variables],
-                [v.value for v in self.model.non_trainable_variables],
-            )
-            return jit_forward(kv_caches, input_ids, attention_metadata, state)
-
-        return wrapped
