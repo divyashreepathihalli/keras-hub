@@ -275,7 +275,7 @@ def tf_copy_gfile_to_cache(preset, path):
     target_dir = os.path.abspath(os.path.join(base_dir, "models", model_dir))
     local_path = os.path.abspath(os.path.join(target_dir, path))
 
-    if not local_path.startswith(target_dir):
+    if os.path.commonpath([target_dir, local_path]) != target_dir:
         raise ValueError(
             f"Invalid path: '{path}'. It escapes the target directory."
         )
