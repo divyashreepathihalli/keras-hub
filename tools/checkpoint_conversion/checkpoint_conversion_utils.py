@@ -34,10 +34,10 @@ def extract_files_from_archive(archive_file_path):
             for member in zip_ref.infolist():
                 if not _is_within_directory(".", member.filename):
                     raise Exception(
-                        f"Attempted Path Traversal in Zip File: {member.filename}"
+                        "Attempted Path Traversal in Zip File: "
+                        f"{member.filename}"
                     )
             return zip_ref.extractall()
-
 
 
 def download_gcs_file(gcs_uri, destination_file_name):
