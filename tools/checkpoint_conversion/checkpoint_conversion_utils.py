@@ -14,10 +14,11 @@ def get_md5_checksum(file_path):
 
 def _is_within_directory(directory, target):
     abs_directory = os.path.abspath(directory)
-    abs_target = os.path.abspath(target)
-    if not abs_directory.endswith(os.path.sep):
-        abs_directory += os.path.sep
-    return abs_target.startswith(abs_directory)
+    abs_target = os.path.abspath(os.path.join(abs_directory, target))
+    try:
+        return os.path.commonpath([abs_directory, abs_target]) == abs_directory
+    except ValueError:
+        return False
 
 
 def extract_files_from_archive(archive_file_path):
