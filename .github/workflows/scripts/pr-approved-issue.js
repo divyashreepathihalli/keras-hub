@@ -51,7 +51,7 @@ module.exports = async ({ github, context, core }) => {
       console.log(`Added "${SECTION_HEADING}" section to #${pr.number}.`);
     }
     if (!isDraft) {
-      isDraft = await convertToDraft(github, pr);
+      isDraft = await convertToDraft(github, core, pr);
     }
   }
 
@@ -73,9 +73,9 @@ module.exports = async ({ github, context, core }) => {
 
   // 3. Flip the draft state to match the result.
   if (passed && isDraft) {
-    isDraft = await markReadyForReview(github, pr);
+    isDraft = await markReadyForReview(github, core, pr);
   } else if (!passed && action === "ready_for_review") {
-    isDraft = await convertToDraft(github, pr);
+    isDraft = await convertToDraft(github, core, pr);
   }
 
   // 4. Report via a sticky comment and the job status.
@@ -90,6 +90,9 @@ module.exports = async ({ github, context, core }) => {
     : [
         `❌ Approved issue check failed. This PR ${isDraft ? "stays" : "must stay"} in **draft** until ` +
           "it links an approved issue that is assigned to you.",
+        ...(isDraft || action === "edited"
+          ? []
+          : ["> Note for maintainers: automatic draft conversion failed; see the workflow run log."]),
         "",
         "To fix this:",
         "1. Find or open an issue for this change and ask a maintainer to approve it and assign it to you.",
@@ -126,7 +129,7 @@ function findIssueNumbers(body, owner, repo) {
   return [...numbers];
 }
 
-async function convertToDraft(github, pr) {
+async function convertToDraft(github, core, pr) {
   try {
     await github.graphql(
       `mutation($id: ID!) {
@@ -139,12 +142,15 @@ async function convertToDraft(github, pr) {
     console.log(`Converted #${pr.number} to draft.`);
     return true;
   } catch (err) {
-    console.log(`Could not convert #${pr.number} to draft: ${err.message}`);
+    core.warning(
+      `Could not convert #${pr.number} to draft: ${err.message}. ` +
+        "Is the PR_APPROVED_ISSUE_TOKEN secret set to a token with pull request write access?"
+    );
     return pr.draft;
   }
 }
 
-async function markReadyForReview(github, pr) {
+async function markReadyForReview(github, core, pr) {
   try {
     await github.graphql(
       `mutation($id: ID!) {
@@ -157,7 +163,10 @@ async function markReadyForReview(github, pr) {
     console.log(`Marked #${pr.number} as ready for review.`);
     return false;
   } catch (err) {
-    console.log(`Could not mark #${pr.number} as ready for review: ${err.message}`);
+    core.warning(
+      `Could not mark #${pr.number} as ready for review: ${err.message}. ` +
+        "Is the PR_APPROVED_ISSUE_TOKEN secret set to a token with pull request write access?"
+    );
     return true;
   }
 }
