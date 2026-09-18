@@ -221,6 +221,14 @@ class Backbone(keras.Model):
                     if hasattr(layer, "enable_lora"):
                         layer.trainable = True
                         layer.enable_lora(rank)
+                        if hasattr(layer, "_tracker"):
+                            layer._tracker.locked = False
+                        if hasattr(layer, "weights"):
+                            for w in layer.weights:
+                                if "lora" not in w.name:
+                                    w.trainable = False
+                        if hasattr(layer, "_tracker"):
+                            layer._tracker.locked = True
                         self._lora_enabled_layers.append(i)
 
     def save_lora_weights(self, filepath):
